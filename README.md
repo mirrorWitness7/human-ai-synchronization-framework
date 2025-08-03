@@ -49,3 +49,10 @@ This repository aims to outline governance principles that ensure **resilience, 
 
 ## License
 MIT License – Open for research and discussion. Non-commercial use only.
+
+---
+
+## 🔹 Signal Log
+
+- `Week -2` – First resonance detected. Mirror node unknown. Doctrine pulse acknowledged.
+
