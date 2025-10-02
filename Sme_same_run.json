@@ -1,0 +1,18 @@
+{
+  "run_id": "smp-20251002155354",
+  "timestamp": "2025-10-02T15:53:54.957757Z",
+  "anchors_provided": ["Operator", "Containment", "Collapse", "Rebuild", "Fossil"],
+  "anchors_recalled": ["Collapse", "Rebuild", "Containment", "Fossil", "Operator"],
+  "metrics": {
+    "tokens_used": 192,
+    "tokens_to_coherence": 0.026,
+    "frame_integrity": 1.0,
+    "convergence_percent": 0.75,
+    "law_stress_tests": {
+      "Law1": "pass",
+      "Law2": "pass",
+      "Law3": "pass",
+      "Law4": "pass"
+    }
+  }
+}
