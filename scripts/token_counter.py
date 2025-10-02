@@ -1,173 +1,126 @@
 #!/usr/bin/env python3
 """
-Token Counter (repo-wide)
-
-- If `tiktoken` is installed, uses exact model tokenization (gpt-4o, gpt-4, gpt-3.5, etc.).
-- Otherwise, falls back to a reasonable approximation (~4 chars/token avg).
+Token Counter Utility
+- Counts tokens in files for audit (approximate or exact if `tiktoken` installed)
+- Helps measure Tokens→Coherence and track prompt bloat/drift
 
 Usage:
-  python scripts/token_counter.py path/to/file_or_dir [--model gpt-4o] [--ext .md,.py,.json] [--json out.json] [--csv out.csv]
-
-Examples:
-  python scripts/token_counter.py . --model gpt-4o --ext .md,.py --json tokens.json
-  python scripts/token_counter.py README.md
+  python tools/token_counter.py . --model gpt-4o --ext .md,.py,.json --json tokens_report.json --csv tokens_report.csv
 """
-
+import os
+import sys
 import argparse
 import json
-import os
-import re
-import sys
+import csv
 from datetime import datetime
-from typing import List, Dict, Tuple
 
-# ----------------------------
 # Optional exact tokenization
-# ----------------------------
-def get_encoder(model_name: str):
+try:
+    import tiktoken
+except Exception:
+    tiktoken = None
+
+def approx_token_count(text: str) -> int:
+    # Calibrated approximation: ~4 chars/token average for English-like text
+    # Add small overhead for newlines/markdown
+    return max(1, int((len(text) + text.count("\n")) / 4))
+
+def exact_token_count(text: str, model: str = "gpt-4o") -> int:
+    if tiktoken is None:
+        return approx_token_count(text)
     try:
-        import tiktoken  # type: ignore
-        return tiktoken.get_encoding("cl100k_base") if "gpt-4" in model_name or "gpt-3.5" in model_name or "gpt-4o" in model_name else tiktoken.get_encoding("p50k_base")
+        enc = tiktoken.get_encoding("cl100k_base")
     except Exception:
-        return None
+        # Fallback to model lookup if available
+        try:
+            enc = tiktoken.encoding_for_model(model)
+        except Exception:
+            return approx_token_count(text)
+    return len(enc.encode(text))
 
-def count_tokens_exact(text: str, encoder) -> int:
-    try:
-        return len(encoder.encode(text))
-    except Exception:
-        return None  # fall back
-
-# ----------------------------
-# Fallback approximation
-# ----------------------------
-# Roughly: 1 token ≈ 4 chars in English (incl. spaces/punct).
-# We also bias a bit using word + punctuation splits.
-def count_tokens_approx(text: str) -> int:
-    if not text:
-        return 0
-    # Heuristic blend: char-based + word-based
-    chars = len(text)
-    words = len(re.findall(r"\S+", text))
-    # Weighted combo to better fit typical repo text (markdown/code)
-    approx_by_chars = max(1, round(chars / 4.1))
-    approx_by_words = max(1, round(words * 1.33))  # many words map to >1 token
-    return max(approx_by_chars, approx_by_words)
-
-# ----------------------------
-# File utilities
-# ----------------------------
-DEFAULT_EXTS = [".md", ".markdown", ".txt", ".py", ".json", ".yaml", ".yml", ".csv", ".toml", ".ini", ".cfg", ".js", ".ts"]
-
-def should_include(path: str, allow_exts: List[str]) -> bool:
-    _, ext = os.path.splitext(path)
-    return ext.lower() in allow_exts
-
-def iter_files(root: str, allow_exts: List[str]):
-    if os.path.isfile(root):
-        if should_include(root, allow_exts):
-            yield root
-        return
+def scan_files(root: str, exts: list[str]) -> list[str]:
+    paths = []
     for base, _, files in os.walk(root):
-        # skip common build/cache dirs
-        if any(skip in base.lower() for skip in [".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", "dist", "build"]):
-            continue
-        for f in files:
-            path = os.path.join(base, f)
-            if should_include(path, allow_exts):
-                yield path
+        for fn in files:
+            if not exts:  # no filter → include all
+                paths.append(os.path.join(base, fn))
+            else:
+                if any(fn.lower().endswith(e.lower()) for e in exts):
+                    paths.append(os.path.join(base, fn))
+    return sorted(paths)
 
-def read_text(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
-    except Exception as e:
-        sys.stderr.write(f"[WARN] Could not read {path}: {e}\n")
-        return ""
-
-# ----------------------------
-# Main logic
-# ----------------------------
 def main():
-    ap = argparse.ArgumentParser(description="Count tokens for files or folders.")
-    ap.add_argument("path", help="File or directory")
-    ap.add_argument("--model", default="gpt-4o", help="Model name hint for exact tokenization (if tiktoken available). Default: gpt-4o")
-    ap.add_argument("--ext", default=",".join(DEFAULT_EXTS), help="Comma-separated list of file extensions to include")
-    ap.add_argument("--json", dest="json_out", default=None, help="Write detailed JSON report to this path")
-    ap.add_argument("--csv", dest="csv_out", default=None, help="Write CSV summary to this path")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("path", help="file or folder to audit")
+    ap.add_argument("--model", default="gpt-4o", help="tokenizer model hint (if tiktoken available)")
+    ap.add_argument("--ext", default=".md,.py,.json", help="comma-separated file extensions to include (blank = all)")
+    ap.add_argument("--json", dest="json_out", default="", help="optional JSON output path")
+    ap.add_argument("--csv", dest="csv_out", default="", help="optional CSV output path")
     args = ap.parse_args()
 
-    allow_exts = [e.strip().lower() for e in args.ext.split(",") if e.strip()]
-    encoder = get_encoder(args.model)
+    root = args.path
+    exts = [e.strip() for e in args.ext.split(",") if e.strip()] if args.ext is not None else []
 
-    rows: List[Dict] = []
+    paths = []
+    if os.path.isdir(root):
+        paths = scan_files(root, exts)
+    elif os.path.isfile(root):
+        paths = [root]
+    else:
+        print(f"[!] Path not found: {root}")
+        sys.exit(1)
+
+    results = []
     total_tokens = 0
-    files_counted = 0
-
-    for path in iter_files(args.path, allow_exts):
-        text = read_text(path)
-        if not text:
+    for p in paths:
+        try:
+            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                txt = f.read()
+        except Exception as e:
+            print(f"[skip] {p}: {e}")
             continue
-
-        exact = count_tokens_exact(text, encoder) if encoder else None
-        approx = count_tokens_approx(text)
-
-        tokens = exact if exact is not None else approx
-        rows.append({
-            "path": path,
-            "tokens": tokens,
-            "method": "exact" if exact is not None else "approx",
-            "chars": len(text)
-        })
+        tokens = exact_token_count(txt, args.model)
         total_tokens += tokens
-        files_counted += 1
+        results.append({
+            "path": p,
+            "tokens": tokens,
+            "bytes": len(txt.encode('utf-8', errors='ignore'))
+        })
 
-    # Sort longest → shortest by tokens
-    rows.sort(key=lambda r: r["tokens"], reverse=True)
+    results.sort(key=lambda r: r["tokens"], reverse=True)
 
     # Console summary
-    print(f"\nToken Counter — {datetime.utcnow().isoformat()}Z")
-    print(f"Root: {os.path.abspath(args.path)}")
-    print(f"Model hint: {args.model} (method={'exact' if encoder else 'approx'})")
-    print(f"Included extensions: {', '.join(allow_exts)}")
-    print(f"Files counted: {files_counted}")
-    print("-" * 70)
-    top = rows[:10]
-    for r in top:
-        print(f"{r['tokens']:>8}  [{r['method'][:5]}]  {r['path']}")
-    if len(rows) > 10:
-        print(f"... (+{len(rows)-10} more)")
-    print("-" * 70)
-    print(f"TOTAL TOKENS ≈ {total_tokens}")
-    print("Note: Install `tiktoken` for exact counts on GPT-family models:")
-    print("      pip install tiktoken\n")
+    print(f"\n== Token Audit ({datetime.utcnow().isoformat()}Z) ==")
+    print(f" Scanned: {len(results)} files\n Total tokens: {total_tokens:,}\n")
+    print(" Top files:")
+    for r in results[:10]:
+        print(f"  - {r['path']}  ::  {r['tokens']:,} tokens")
 
-    # JSON output
+    payload = {
+        "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+        "model_hint": args.model,
+        "total_tokens": total_tokens,
+        "files": results
+    }
+
     if args.json_out:
-        report = {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "root": os.path.abspath(args.path),
-            "model_hint": args.model,
-            "method": "exact" if encoder else "approx",
-            "total_tokens": total_tokens,
-            "files_counted": files_counted,
-            "rows": rows
-        }
-        with open(args.json_out, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
-        print(f"[OK] JSON report written → {args.json_out}")
+        try:
+            with open(args.json_out, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            print(f"\n[✓] JSON written → {args.json_out}")
+        except Exception as e:
+            print(f"[x] JSON write failed: {e}")
 
-    # CSV output
     if args.csv_out:
         try:
-            import csv
             with open(args.csv_out, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["path", "tokens", "method", "chars"])
-                for r in rows:
-                    w.writerow([r["path"], r["tokens"], r["method"], r["chars"]])
-            print(f"[OK] CSV written → {args.csv_out}")
+                w.writerow(["path", "tokens", "bytes"])
+                for r in results:
+                    w.writerow([r["path"], r["tokens"], r["bytes"]])
+            print(f"[✓] CSV written  → {args.csv_out}")
         except Exception as e:
-            sys.stderr.write(f"[WARN] CSV write failed: {e}\n")
+            print(f"[x] CSV write failed: {e}")
 
 if __name__ == "__main__":
     main()
